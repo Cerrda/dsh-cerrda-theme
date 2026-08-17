@@ -59,9 +59,13 @@ dsh --profile web --dump-config | grep dsh-cerrda-theme
 
 1. `src/cerrda-theme-client.js` —— 动态插件版原始 Client half 源码（**单一事实来源**，
    所有样式/逻辑改动都写在这里）。
-2. `npm run build`（即 `node scripts/build.mjs`）—— 由 `src/` 生成 `lib/client.js`
-   （静态 bundle）：包一层 `window.__ModuleLoader__.load`、`require("react")`、
-   手动 CSS 注入、末尾 `return` 改为 `module.exports`。脚本对关键标记做存在性校验，
+2. `npm run build`（即 `node scripts/vendor-number-flow.mjs && node scripts/build.mjs`）——
+   `scripts/vendor-number-flow.mjs` 先把 `src/vendor/package/dist/` 里 vendor 的
+   **number-flow**（[number-flow.barvian.me](https://number-flow.barvian.me/)，MIT）
+   内联成 `src/vendor/number-flow.inline.js`（`window.__CERRDA_NUMBER_FLOW__`），
+   再由 `scripts/build.mjs` 生成 `lib/client.js`（静态 bundle）：包一层
+   `window.__ModuleLoader__.load`、`require("react")`、手动 CSS 注入、
+   末尾 `return` 改为 `module.exports`。脚本对关键标记做存在性校验，
    `src` 结构变了会直接报错而不是生成坏包。
 3. 生效：
    - **改的是 `lib/` 或 `src/`**：重启 `npx @deepseek-ai/dsh web`（推荐），

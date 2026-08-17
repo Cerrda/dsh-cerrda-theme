@@ -21,7 +21,9 @@ const TOKEN_OVERRIDES = {
 
 // ---- Liquid Glass (SVG displacement, composer + back-to-bottom) -------------
 function makeDisplacementMap(w, h, radius) {
-  const border = Math.min(w, h) * 0.175; // border factor 0.35 * 0.5
+  // border factor 0.12：位移带更窄（0.175 时边缘位移带太宽，内容滑过玻璃时
+  // 会被明显向两边甩，产生"从中间往两边跑"的违和感）
+  const border = Math.min(w, h) * 0.12;
   const outerRx = Math.min(radius, w / 2, h / 2);
   const innerRx = Math.max(0, outerRx - border);
   const innerW = Math.max(0, w - border * 2);
@@ -45,20 +47,27 @@ function makeDisplacementMap(w, h, radius) {
 function buildLiquidFilter(filterId, map) {
   // 滤镜元素必须始终存在：backdrop-filter 引用缺失的 url(#id) 会渲染成不透明黑块。
   // map 未就绪时用 1x1 黑色位移图占位，避免黑块。
+  // 色散（chromatic dispersion）：RGB 三个通道用不同的位移 scale（-28/-24/-20，
+  // 相差 ±4），沿边缘产生轻微彩色折射条纹 —— cerrda 液态玻璃的标志性效果。
+  // 注意：位移幅度不宜再大 —— scale 过大时（如 -80 量级），玻璃边缘会把滑过的
+  // 内容向两边甩出 ~40px，出现"从玻璃中间往两边跑"的违和感。
   const EMPTY_MAP = 'data:image/svg+xml,' + encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="black"/></svg>'
   );
   return React.createElement('filter', {
     id: filterId,
     colorInterpolationFilters: 'sRGB',
-    x: '-10%', y: '-10%', width: '120%', height: '120%',
+    // 区域 = 元素本身：位移图与元素 1:1 对齐，液态边缘环落在四条边的可见范围内，
+    // 顶部/底部/左右得到一致的折射边缘。之前 -10%..110% 的区域会把环压到元素
+    // 外侧 10% 处，卡片内部几乎看不到折射，底部（无内容可扭曲）就显得"没有玻璃"。
+    x: '0%', y: '0%', width: '100%', height: '100%',
   },
     React.createElement('feImage', { x: 0, y: 0, width: '100%', height: '100%', preserveAspectRatio: 'none', href: map || EMPTY_MAP, result: 'map' }),
-    React.createElement('feDisplacementMap', { in: 'SourceGraphic', in2: 'map', xChannelSelector: 'R', yChannelSelector: 'B', scale: -80, result: 'dispRed' }),
+    React.createElement('feDisplacementMap', { in: 'SourceGraphic', in2: 'map', xChannelSelector: 'R', yChannelSelector: 'B', scale: -28, result: 'dispRed' }),
     React.createElement('feColorMatrix', { in: 'dispRed', type: 'matrix', values: '1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0', result: 'red' }),
-    React.createElement('feDisplacementMap', { in: 'SourceGraphic', in2: 'map', xChannelSelector: 'R', yChannelSelector: 'B', scale: -78, result: 'dispGreen' }),
+    React.createElement('feDisplacementMap', { in: 'SourceGraphic', in2: 'map', xChannelSelector: 'R', yChannelSelector: 'B', scale: -24, result: 'dispGreen' }),
     React.createElement('feColorMatrix', { in: 'dispGreen', type: 'matrix', values: '0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 1 0', result: 'green' }),
-    React.createElement('feDisplacementMap', { in: 'SourceGraphic', in2: 'map', xChannelSelector: 'R', yChannelSelector: 'B', scale: -76, result: 'dispBlue' }),
+    React.createElement('feDisplacementMap', { in: 'SourceGraphic', in2: 'map', xChannelSelector: 'R', yChannelSelector: 'B', scale: -20, result: 'dispBlue' }),
     React.createElement('feColorMatrix', { in: 'dispBlue', type: 'matrix', values: '0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 1 0', result: 'blue' }),
     React.createElement('feBlend', { in: 'red', in2: 'green', mode: 'screen', result: 'rg' }),
     React.createElement('feBlend', { in: 'rg', in2: 'blue', mode: 'screen' })
@@ -68,8 +77,13 @@ function buildLiquidFilter(filterId, map) {
 function LiquidGlassProvider() {
   const [map, setMap] = React.useState('');
   const [miniMap, setMiniMap] = React.useState('');
+  const [toolMaps, setToolMaps] = React.useState({}); // 任务卡片: filterId -> displacement map
   const dims = React.useRef({ w: 0, h: 0 });
   const miniDims = React.useRef({ w: 0, h: 0 });
+  const toolSeq = React.useRef(0);
+  const toolIds = React.useRef(new WeakMap()); // el -> filterId
+  const toolDims = React.useRef(new Map());    // filterId -> { w, h }
+  const toolEls = React.useRef(new Map());     // filterId -> el
   React.useEffect(() => {
     let ro = null;
     let mo = null;
@@ -84,20 +98,78 @@ function LiquidGlassProvider() {
         setter(makeDisplacementMap(w, h, radius));
       }
     };
+    const ensureRo = () => {
+      if (ro !== null) return ro;
+      try { ro = new ResizeObserver(update); } catch (e) { ro = null; }
+      return ro;
+    };
+    const applyTool = (el, id) => {
+      const rect = el.getBoundingClientRect();
+      const w = Math.round(rect.width);
+      const h = Math.round(rect.height);
+      const prev = toolDims.current.get(id);
+      if (w > 0 && h > 0 && (prev === void 0 || w !== prev.w || h !== prev.h)) {
+        toolDims.current.set(id, { w, h });
+        setToolMaps((p) => ({ ...p, [id]: makeDisplacementMap(w, h, 16) }));
+      }
+    };
+    const registerTool = (el) => {
+      let id = toolIds.current.get(el);
+      if (id !== void 0) return id;
+      id = 'cerrda-liquid-glass-tool-' + (++toolSeq.current);
+      toolIds.current.set(el, id);
+      toolEls.current.set(id, el);
+      toolDims.current.set(id, void 0);
+      // 先注册占位 map（空字符串 → EMPTY_MAP），保证滤镜元素在 url() 被引用前已存在，
+      // 否则 backdrop-filter 引用缺失的滤镜会渲染成不透明黑块
+      el.style.setProperty('--cerrda-tool-filter', 'url(#' + id + ')');
+      setToolMaps((p) => (Object.prototype.hasOwnProperty.call(p, id) ? p : { ...p, [id]: '' }));
+      ensureRo()?.observe(el);
+      return id;
+    };
     const update = () => {
       const card = document.querySelector('[data-composer-card]');
-      if (card) apply(card, dims, setMap, 22);
+      if (card) {
+        ensureRo()?.observe(card);
+        apply(card, dims, setMap, 22);
+      }
       const btn = document.querySelector('[class*="_toBottom"]:not([class*="_toBottomSlot"])');
-      if (btn) apply(btn, miniDims, setMiniMap, 17);
+      if (btn) {
+        ensureRo()?.observe(btn);
+        apply(btn, miniDims, setMiniMap, 17);
+      }
+      const tools = document.querySelectorAll('[data-tool]');
+      const alive = new Set();
+      for (const el of tools) {
+        const id = registerTool(el);
+        alive.add(id);
+        applyTool(el, id);
+      }
+      if (toolEls.current.size > 0) {
+        let pruned = false;
+        for (const [id, el] of toolEls.current) {
+          if (!alive.has(id) || !document.contains(el)) {
+            toolEls.current.delete(id);
+            toolDims.current.delete(id);
+            if (toolIds.current.get(el) === id) toolIds.current.delete(el);
+            if (ro) { try { ro.unobserve(el); } catch (e) { /* noop */ } }
+            pruned = true;
+          }
+        }
+        if (pruned) {
+          setToolMaps((prev) => {
+            const next = {};
+            for (const k of Object.keys(prev)) if (toolEls.current.has(k)) next[k] = prev[k];
+            return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+          });
+        }
+      }
     };
     const probe = () => {
       if (raf) return;
       raf = window.requestAnimationFrame(() => {
         raf = 0;
-        const card = document.querySelector('[data-composer-card]');
-        if (card && !ro) {
-          try { ro = new ResizeObserver(update); ro.observe(card); } catch (e) { /* noop */ }
-        }
+        if (ro === null) ensureRo();
         update();
       });
     };
@@ -121,12 +193,13 @@ function LiquidGlassProvider() {
     style: { position: 'absolute', width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' },
   }, React.createElement('defs', null,
     buildLiquidFilter('cerrda-liquid-glass', map),
-    buildLiquidFilter('cerrda-liquid-glass-mini', miniMap)
+    buildLiquidFilter('cerrda-liquid-glass-mini', miniMap),
+    Object.keys(toolMaps).map((id) => React.cloneElement(buildLiquidFilter(id, toolMaps[id]), { key: id }))
   ));
 }
 
 // ---- CSS -------------------------------------------------------------------
-const CSS = String.raw`
+const THEME_CSS = String.raw`
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Sora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root,
@@ -454,27 +527,17 @@ div:has(> [data-slot='details']) {
   backdrop-filter: blur(10px) saturate(1.25);
 }
 
-/* hero 模式：composerHero 变成与输入框同款的 Liquid Glass 面板
-   （SVG 位移滤镜 + 磨砂 + chrome 高光），composerStack 保持透明 + 四周 24px 留白 */
+/* hero 模式：composerStack 保持透明 + 四周 24px 留白；玻璃直接给提问卡片本体
+   （composerHero 的高规格玻璃会被更高优先级的 composerStack 覆盖规则压掉，
+   干脆让卡片自己承担 Liquid Glass，和输入框完全一致） */
 [data-phase='hero'] [data-composer-seat] [class*='_composerStack'] {
   padding: 24px !important;
   background: transparent !important;
-}
-
-[data-composer-seat] [class*='_composerHero'] {
-  padding: 24px !important;
-  background: color-mix(in oklch, var(--cerrda-layer-1) 24%, transparent) !important;
-  -webkit-backdrop-filter: blur(26px) saturate(1.6);
-  backdrop-filter: blur(26px) saturate(1.6);
-  -webkit-backdrop-filter: url(#cerrda-liquid-glass);
-  backdrop-filter: url(#cerrda-liquid-glass);
-  border: 1px solid color-mix(in oklch, var(--cerrda-fg) 9%, transparent) !important;
-  border-radius: 24px !important;
-  box-shadow:
-    inset 0 0 2px 1px color-mix(in oklch, var(--cerrda-fg) 9%, transparent),
-    inset 0 0 12px 4px color-mix(in oklch, var(--cerrda-fg) 5%, transparent),
-    0 4px 16px var(--cerrda-shadow-bloom),
-    0 10px 28px var(--cerrda-shadow-bloom) !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
 }
 
 /* hero 区域内部发散的光晕：HeroGlow SVG（蓝色模糊椭圆，wSkVaW_heroGlow）
@@ -483,13 +546,20 @@ div:has(> [data-slot='details']) {
   display: none !important;
 }
 
-/* hero 模式下的输入卡片：完全无背景（不要背景），只留细描边，silk 彻底透出 */
+/* hero 模式下的提问卡片：与输入框同款的全套 Liquid Glass
+   （frost 磨砂 + SVG 位移滤镜 + 描边 + 内高光 + bloom），不再透明 */
 [data-phase='hero'] [data-composer-card] {
-  background: transparent !important;
-  -webkit-backdrop-filter: none !important;
-  backdrop-filter: none !important;
-  border-color: color-mix(in oklch, var(--cerrda-fg) 8%, transparent) !important;
-  box-shadow: none !important;
+  background: color-mix(in oklch, var(--cerrda-layer-1) 24%, transparent) !important;
+  -webkit-backdrop-filter: blur(26px) saturate(1.6);
+  backdrop-filter: blur(26px) saturate(1.6);
+  -webkit-backdrop-filter: url(#cerrda-liquid-glass);
+  backdrop-filter: url(#cerrda-liquid-glass);
+  border: 1px solid color-mix(in oklch, var(--cerrda-fg) 9%, transparent) !important;
+  box-shadow:
+    inset 0 0 2px 1px color-mix(in oklch, var(--cerrda-fg) 9%, transparent),
+    inset 0 0 12px 4px color-mix(in oklch, var(--cerrda-fg) 5%, transparent),
+    0 4px 16px var(--cerrda-shadow-bloom),
+    0 10px 28px var(--cerrda-shadow-bloom) !important;
 }
 
 /* ---------- LIQUID GLASS (SVG displacement): composer only ----------
@@ -510,41 +580,28 @@ div:has(> [data-slot='details']) {
     0 10px 28px var(--cerrda-shadow-bloom) !important;
 }
 
-/* ---------- CSS liquid glass: tool call cards（cerrda CssLiquidGlass 加强版：
-   frost 磨砂 + chrome 强高光/内折射 + specular 斜光 + double border + 内 rim） ---------- */
+/* ---------- Liquid Glass: 任务卡片（[data-tool] 工具调用卡片） ----------
+   与输入框同款：frost 磨砂 + SVG 位移滤镜（每张卡独立 map）+ 细描边 + 内高光 + bloom。
+   位移滤镜 id 由 LiquidGlassProvider 逐卡分配（内联 --cerrda-tool-filter），
+   map 未就绪时回退到始终存在的 composer 滤镜（url(#cerrda-liquid-glass)），不会黑块。 */
 [data-tool] {
   border-radius: 16px !important;
   overflow: hidden;
-  background-color: color-mix(in oklch, var(--cerrda-layer-1) 58%, transparent) !important;
-  background-image:
-    linear-gradient(45deg, rgba(255 255 255 / 0.07) 0%, transparent 30%, transparent 70%, rgba(255 255 255 / 0.07) 100%) !important;
-  -webkit-backdrop-filter: blur(8px) saturate(1.5);
-  backdrop-filter: blur(8px) saturate(1.5);
-  border: 1px double rgba(255 255 255 / 0.1) !important;
+  background: color-mix(in oklch, var(--cerrda-layer-1) 24%, transparent) !important;
+  -webkit-backdrop-filter: blur(26px) saturate(1.6);
+  backdrop-filter: blur(26px) saturate(1.6);
+  -webkit-backdrop-filter: blur(26px) saturate(1.6) var(--cerrda-tool-filter, url(#cerrda-liquid-glass));
+  backdrop-filter: blur(26px) saturate(1.6) var(--cerrda-tool-filter, url(#cerrda-liquid-glass));
+  border: 1px solid color-mix(in oklch, var(--cerrda-fg) 9%, transparent) !important;
   box-shadow:
-    inset 3px -3px 1px -1px rgba(255 255 255 / 0.14),
-    inset -3px 3px 1px -1px rgba(255 255 255 / 0.14),
-    inset 8px -8px 1px -8px rgba(255 255 255 / 0.07),
-    inset -8px 8px 1px -8px rgba(255 255 255 / 0.07),
-    inset 0 0 3px rgba(0 0 0 / 0.45),
-    inset 0 0 0 1px rgba(255 255 255 / 0.05),
-    0 8px 22px -14px var(--cerrda-shadow-bloom) !important;
-}
-
-/* 内 rim：贴近边缘的细亮框，增强玻璃折射感 */
-[data-tool]::after {
-  content: '';
-  position: absolute;
-  inset: 5px;
-  z-index: 0;
-  border: 1px solid rgba(255 255 255 / 0.06);
-  border-radius: inherit;
-  filter: blur(1px);
-  pointer-events: none;
+    inset 0 0 2px 1px color-mix(in oklch, var(--cerrda-fg) 9%, transparent),
+    inset 0 0 12px 4px color-mix(in oklch, var(--cerrda-fg) 5%, transparent),
+    0 4px 16px var(--cerrda-shadow-bloom),
+    0 10px 28px var(--cerrda-shadow-bloom) !important;
 }
 
 [data-tool][data-state='error'] {
-  background-color: color-mix(in oklch, var(--cerrda-error) 10%, color-mix(in oklch, var(--cerrda-layer-1) 60%, transparent)) !important;
+  background-color: color-mix(in oklch, var(--cerrda-error) 10%, color-mix(in oklch, var(--cerrda-layer-1) 24%, transparent)) !important;
 }
 
 /* ---------- CSS liquid glass: overlays ---------- */
@@ -914,14 +971,16 @@ body {
   letter-spacing: -0.02em !important;
 }
 
-[data-composer-seat] [class*='_workspace'] {
+/* 只命中 workspace 芯片按钮本身（pXSMma_workspace），排除 workspaceLabel /
+   workspaceRow —— 否则 label 会被套上独立边框+背景，hover 时出现多余描边 */
+[data-composer-seat] [class*='_workspace']:not([class*='_workspaceLabel']):not([class*='_workspaceRow']) {
   border-radius: 999px !important;
   background: color-mix(in oklch, var(--cerrda-fg) 5%, transparent) !important;
   border: 1px solid color-mix(in oklch, var(--cerrda-fg) 9%, transparent) !important;
   transition: all 0.2s var(--cerrda-ease) !important;
 }
 
-[data-composer-seat] [class*='_workspace']:hover {
+[data-composer-seat] [class*='_workspace']:not([class*='_workspaceLabel']):not([class*='_workspaceRow']):hover {
   background: color-mix(in oklch, var(--cerrda-primary) 13%, transparent) !important;
   border-color: color-mix(in oklch, var(--cerrda-primary) 38%, transparent) !important;
   color: var(--cerrda-primary) !important;
@@ -1015,11 +1074,10 @@ body {
 
 [data-tool]:hover {
   box-shadow:
-    inset 2px -2px 1px -1px rgba(255 255 255 / 0.12),
-    inset -2px 2px 1px -1px rgba(255 255 255 / 0.12),
-    inset 0 0 2px rgba(0 0 0 / 0.35),
-    inset 0 0 0 1px rgba(255 255 255 / 0.05),
-    0 12px 30px -14px var(--cerrda-shadow-bloom) !important;
+    inset 0 0 2px 1px color-mix(in oklch, var(--cerrda-fg) 12%, transparent),
+    inset 0 0 12px 4px color-mix(in oklch, var(--cerrda-fg) 8%, transparent),
+    0 6px 20px var(--cerrda-shadow-bloom),
+    0 14px 36px var(--cerrda-shadow-bloom) !important;
 }
 
 [data-tool] > *:not([class*='_visuallyHidden']) {
@@ -1234,6 +1292,13 @@ body {
   color: var(--cerrda-primary) !important;
 }
 
+/* 代码搜索块复制按钮（_copyButton_s66q0_40）：shipped 默认 padding:0，
+   胶囊里文字贴边 —— 补上恰当内边距（上 2 / 右 10 / 下 3 / 左 10）让文字居中 */
+[class*='_copyButton'][class*='_s66q0_'] {
+  padding: 2px 10px 3px !important;
+  line-height: 16px;
+}
+
 /* ---- 弹窗卡片：cerrda 边框 + bloom 阴影 ---- */
 [role='dialog'] {
   border: 1px solid color-mix(in oklch, var(--cerrda-fg) 12%, transparent) !important;
@@ -1315,6 +1380,39 @@ body {
     animation: none;
     opacity: 0.4;
   }
+}
+
+/* ==========================================================================
+   V5 — "Deep diving..." 计时：number-flow 数字滚动
+   （https://number-flow.barvian.me/；库本体由 scripts/vendor-number-flow.mjs
+   内联为 window.__CERRDA_NUMBER_FLOW__）
+   shipped TurnStatus 每秒用 React 重写时钟 span（Md3f7G_turnStatusClock）；
+   主题把该 span 隐藏，在旁边插入 [data-cerrda-timer] 容器，
+   里面是两个 <number-flow> 元素（分钟/秒），由 TurnTimerHost 驱动 update()。
+   ========================================================================== */
+/* shipped 的 .turnStatus 是 shimmer 渐变文字（color:#0000 + -webkit-text-fill-color:
+   transparent），会继承进 number-flow 的 shadow —— 必须显式复位，
+   否则数字全是透明的。 */
+[data-cerrda-timer] {
+  font: var(--dsw-font-xs-13);
+  color: var(--dsw-alias-label-caption);
+  -webkit-text-fill-color: var(--dsw-alias-label-caption);
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+  padding: 0 1px; /* 数字两侧的呼吸空间 */
+}
+
+[data-cerrda-timer] number-flow {
+  line-height: 1;
+  --number-flow-mask-width: 0.55em;
+}
+
+/* 分/秒单位：与数字之间留出空隙（左 2px，右 3px），不再紧贴数字 */
+[data-cerrda-timer] .cerrda-turn-timer-unit {
+  margin: 0 3px 0 2px;
 }
 `;
 
@@ -1629,6 +1727,136 @@ function EffectsHost() {
   return null;
 }
 
+// ---- TurnTimerHost：把 "Deep diving..." 旁边的计时换成 number-flow 数字滚动 ----
+// shipped TurnStatus 每秒用 React 重写时钟 span（[class*='_turnStatusClock']）的文本。
+// 主题做法：隐藏该 span，在旁边插入 [data-cerrda-timer] 容器（两个 <number-flow>
+// 元素：分钟 + 秒），每次 React 更新 span 文本时解析秒数并调用 update() 触发滚动动画。
+// number-flow 库由构建脚本内联为 window.__CERRDA_NUMBER_FLOW__（动态版无此时回退原样）。
+function TurnTimerHost() {
+  React.useEffect(() => {
+    const nfLib = typeof window !== 'undefined' ? window.__CERRDA_NUMBER_FLOW__ : void 0;
+    if (!nfLib || !nfLib.default || typeof MutationObserver !== 'function') return;
+    const lang = String(document.documentElement.lang || navigator.language || 'en').toLowerCase();
+    const zh = lang.indexOf('zh') === 0;
+    // 单位（分/秒）放在 number-flow 元素外面，用 margin 控制数字与单位之间的空隙
+    const MIN_UNIT = zh ? '分' : 'm '; // en: "1m 05s" 的 m 后带空格
+    const SEC_UNIT = zh ? '秒' : 's';
+    // 解析 "1分05秒" / "42秒" / "1m 05s" / "42s" → 总秒数
+    const parseSeconds = (text) => {
+      const m = String(text || '').match(/(?:(\d+)[分m]\s*)?(\d+)[秒s]/);
+      if (!m) return null;
+      return (m[1] ? parseInt(m[1], 10) * 60 : 0) + parseInt(m[2], 10);
+    };
+    const isClockSpan = (el) => el && el.nodeType === 1 && typeof el.className === 'string' && el.className.indexOf('turnStatusClock') !== -1;
+    const entries = new Map(); // span -> { root, minEl, minUnit, secEl, secUnit, secs, pad }
+    const prune = () => {
+      for (const [span, entry] of entries) {
+        if (!span.isConnected) {
+          if (entry.root && entry.root.parentNode) entry.root.parentNode.removeChild(entry.root);
+          entries.delete(span);
+        }
+      }
+    };
+    const ensure = (span) => {
+      let entry = entries.get(span);
+      if (entry) return entry;
+      const root = document.createElement('span');
+      root.className = 'cerrda-turn-timer';
+      root.setAttribute('data-cerrda-timer', '');
+      root.setAttribute('aria-hidden', 'true');
+      const makeFlow = () => {
+        const el = document.createElement('number-flow');
+        el.locales = lang;
+        el.format = { minimumIntegerDigits: 1 };
+        return el;
+      };
+      const makeUnit = (text) => {
+        const unit = document.createElement('span');
+        unit.className = 'cerrda-turn-timer-unit';
+        unit.textContent = text;
+        return unit;
+      };
+      const minEl = makeFlow();
+      const minUnit = makeUnit(MIN_UNIT);
+      const secEl = makeFlow();
+      const secUnit = makeUnit(SEC_UNIT);
+      root.appendChild(minEl);
+      root.appendChild(minUnit);
+      root.appendChild(secEl);
+      root.appendChild(secUnit);
+      span.parentNode.insertBefore(root, span.nextSibling);
+      span.style.display = 'none';
+      entry = { root, minEl, minUnit, secEl, secUnit, secs: null, pad: 1 };
+      entries.set(span, entry);
+      return entry;
+    };
+    const sync = (span, entry, secs) => {
+      if (secs === null || secs === void 0 || secs === entry.secs) return;
+      entry.secs = secs;
+      const minutes = Math.floor(secs / 60);
+      const seconds = secs % 60;
+      if (minutes > 0) {
+        entry.minEl.style.display = '';
+        entry.minUnit.style.display = '';
+        entry.minEl.update(minutes);
+      } else {
+        entry.minEl.style.display = 'none';
+        entry.minUnit.style.display = 'none';
+      }
+      const pad = minutes > 0 ? 2 : 1;
+      if (pad !== entry.pad) {
+        entry.pad = pad;
+        entry.secEl.format = { minimumIntegerDigits: pad };
+      }
+      entry.secEl.update(seconds);
+    };
+    const handle = (span) => {
+      prune();
+      if (!span || !span.parentNode) return;
+      const entry = ensure(span);
+      sync(span, entry, parseSeconds(span.textContent));
+    };
+    const scan = (root) => {
+      if (!root || !root.querySelectorAll) return;
+      const nodes = root.querySelectorAll('[class*="_turnStatusClock"]');
+      for (const el of nodes) handle(el);
+    };
+    let mo = null;
+    mo = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (isClockSpan(mutation.target)) handle(mutation.target);
+        if (mutation.type === 'characterData' && mutation.target && isClockSpan(mutation.target.parentElement)) {
+          handle(mutation.target.parentElement);
+        }
+        for (const node of mutation.addedNodes) {
+          if (!node || node.nodeType !== 1) continue;
+          if (isClockSpan(node)) handle(node);
+          else scan(node);
+        }
+      }
+    });
+    mo.observe(document.body, { childList: true, subtree: true, characterData: true });
+    scan(document);
+    // number-flow 全局样式（:host / light-DOM fallback），只注入一次
+    try {
+      const styles = nfLib.styles;
+      if (Array.isArray(styles)) {
+        styles.forEach((cssText, i) => {
+          const id = 'cerrda-number-flow-style-' + i;
+          if (cssText && !document.getElementById(id)) {
+            const style = document.createElement('style');
+            style.id = id;
+            style.textContent = cssText;
+            document.head.appendChild(style);
+          }
+        });
+      }
+    } catch (e) { /* noop */ }
+    return () => { mo.disconnect(); };
+  }, []);
+  return null;
+}
+
 return {
   apply(ctx) {
     const disposers = [];
@@ -1642,7 +1870,7 @@ return {
       }
     }
 
-    disposers.push(styles.insert(CSS));
+    disposers.push(styles.insert(THEME_CSS));
 
     try {
       disposers.push(mountSilkBackground());
@@ -1659,6 +1887,10 @@ return {
       disposers.push(slots.inject('shell.overlay', () => slots.register(
         { name: 'shell.overlay', id: 'cerrda-effects' },
         () => React.createElement(EffectsHost)
+      )));
+      disposers.push(slots.inject('shell.overlay', () => slots.register(
+        { name: 'shell.overlay', id: 'cerrda-turn-timer' },
+        () => React.createElement(TurnTimerHost)
       )));
     }
 
