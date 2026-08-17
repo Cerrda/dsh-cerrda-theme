@@ -55,10 +55,28 @@ dsh --profile web --dump-config | grep dsh-cerrda-theme
 
 ## 开发
 
-- `src/cerrda-theme-client.js` —— 动态插件版原始 Client half 源码（单一事实来源）。
-- `lib/client.js` —— 静态 bundle，由 `src/` 经固定变换生成（包一层 `__ModuleLoader__.load`、
-  `require("react")`、手动 CSS 注入、末尾 `return` 改为 `module.exports`）。
-  变更源码后需重新生成 `lib/client.js`。
+开发循环：**改 `src/` → `npm run build` → 重启 DSH（或硬刷新页面）**。
+
+1. `src/cerrda-theme-client.js` —— 动态插件版原始 Client half 源码（**单一事实来源**，
+   所有样式/逻辑改动都写在这里）。
+2. `npm run build`（即 `node scripts/build.mjs`）—— 由 `src/` 生成 `lib/client.js`
+   （静态 bundle）：包一层 `window.__ModuleLoader__.load`、`require("react")`、
+   手动 CSS 注入、末尾 `return` 改为 `module.exports`。脚本对关键标记做存在性校验，
+   `src` 结构变了会直接报错而不是生成坏包。
+3. 生效：
+   - **改的是 `lib/` 或 `src/`**：重启 `npx @deepseek-ai/dsh web`（推荐），
+     或只做**硬刷新**页面（Ctrl+Shift+R）——bundle 以 no-cache 从磁盘实时读取，
+     改 CSS/JS 内容通常不用重启即可看到；
+   - **改了 `package.json` / `cordis.patch.yml`**（结构变化）：必须重启 DSH。
+4. 发布前：升 `version`，`npm publish`（`prepare` 钩子会自动先跑 `npm run build`，
+   保证发布内容与 `src/` 一致）。
+
+本地安装（link 到本仓库，改完无需重装）：
+
+```bash
+dsh plugin --profile web add .
+```
+
 - `docs/` —— 设计（plan）、动态恢复说明（restore）、分享说明（share）。
 
 ## 发布
