@@ -368,10 +368,16 @@ div:has(> [data-slot='details']) {
 /* ---------- CSS liquid glass: sidebar（伪元素方案：轻 blur、无包含块，
    不截断内部 fixed 弹层如设置弹窗 / Cordis 面板）
    注意：父元素必须 position:relative + isolation:isolate，
-   ::before z-index:-1 才会在父背景之上、内容之下渲染（否则会被吞掉）。 */
+   ::before z-index:-1 才会在父背景之上、内容之下渲染（否则会被吞掉）。
+   修复（2026-08）：isolation:isolate 会把该列变成 stacking context（z auto），
+   而 DSH 的设置弹窗是 portal 到 sidebar.settings 槽位内部的 —— 弹窗的
+   z-index:1000 被限制在这个 context 里（≈0），反而被合成器 hero（z-index:1）
+   盖住，导致"弹窗层级太低无法操作"。z-index:2 让整列（含其内部的全屏弹窗）
+   高于合成器，弹窗恢复可操作。 */
 [data-slot='sidebar'] > div {
   position: relative;
   isolation: isolate;
+  z-index: 2;
   background: transparent !important;
   box-shadow: inset -1px 0 0 color-mix(in oklch, var(--cerrda-fg) 7%, transparent);
 }
@@ -391,6 +397,7 @@ div:has(> [data-slot='details']) {
 [data-slot='details'] > div {
   position: relative;
   isolation: isolate;
+  z-index: 2; /* 同 sidebar：防止 portal 到该列的全屏弹层被合成器（z:1）盖住 */
   background: transparent !important;
 }
 
@@ -409,6 +416,7 @@ div:has(> [data-slot='details']) {
 [data-slot='conversation.session.header'] > div {
   position: relative;
   isolation: isolate;
+  z-index: 2; /* 同 sidebar：防止 portal 到该槽位的弹层（命令菜单等）被合成器盖住 */
   background: transparent !important;
 }
 
