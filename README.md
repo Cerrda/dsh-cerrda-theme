@@ -19,10 +19,10 @@ dsh plugin --profile web add dsh-cerrda-theme
 然后**重启 DSH 进程**（web profile 的 HMR 已禁用，bundle 层只在启动时应用）。
 重启后主题自动生效，无需任何审批。
 
-本地未发布版本（从本仓库目录执行）：
+本地未发布版本（本仓库根目录就是包，在仓库根执行）：
 
 ```bash
-dsh plugin --profile web add ./dsh-cerrda-theme
+dsh plugin --profile web add .
 ```
 
 ## 卸载
