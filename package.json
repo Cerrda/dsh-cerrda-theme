@@ -1,6 +1,6 @@
 {
   "name": "dsh-cerrda-theme",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Deployment-level static web plugin for DSH: cerrda dark re-theme of the DeepSeek Harness Web GUI (rose/purple oklch, Liquid Glass composer, Silk WebGL2 background, Sora/Fraunces/JetBrains Mono). Install with: dsh plugin --profile web add dsh-cerrda-theme",
   "keywords": [
     "dsh",
