@@ -9,6 +9,15 @@
     "theme",
     "cerrda"
   ],
+  "author": "Cerrda",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cerrda/dsh-cerrda-theme.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Cerrda/dsh-cerrda-theme/issues"
+  },
+  "homepage": "https://github.com/Cerrda/dsh-cerrda-theme#readme",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
