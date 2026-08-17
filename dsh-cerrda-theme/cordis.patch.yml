@@ -1,0 +1,11 @@
+# dsh-cerrda-theme bundle patch — the profile patch this package contributes
+# when installed as a profile layer via `dsh plugin --profile web add`.
+#
+# The row's `name` is this package itself: after install the loader resolves
+# the bare specifier from the profile's node_modules, the host half activates
+# (a carrier row), and dsh-client-modules picks the package's `dsh.client`
+# declaration into the browser roster, serving lib/client.js at
+# /plugins/dsh-cerrda-theme/client.js.
+- insert:
+    - id: dsh-cerrda-theme
+      name: 'dsh-cerrda-theme'
