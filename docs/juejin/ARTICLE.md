@@ -1,4 +1,4 @@
-# 给 DeepSeek Harness（DSH） 换上液态玻璃暗色主题
+# 给 DeepSeek Harness（DSH） 换上液态玻璃丝绸暗色主题
 
 > 安装：`dsh plugin --profile web add dsh-cerrda-theme`  
 > 仓库：[github.com/Cerrda/dsh-cerrda-theme](https://github.com/Cerrda/dsh-cerrda-theme)  
